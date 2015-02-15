@@ -25,6 +25,7 @@ import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.Map;
 import java.util.StringTokenizer;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -66,7 +67,7 @@ public class ResourceResolverImpl extends SlingAdaptable implements ResourceReso
     private final Logger logger = LoggerFactory.getLogger(ResourceResolverImpl.class);
 
     private static final Map<String, String> EMPTY_PARAMETERS = Collections.emptyMap();
-    
+
     private static final String MANGLE_NAMESPACE_IN_SUFFIX = "_";
 
     private static final String MANGLE_NAMESPACE_IN_PREFIX = "/_";
@@ -93,7 +94,7 @@ public class ResourceResolverImpl extends SlingAdaptable implements ResourceReso
     private final CommonResourceResolverFactoryImpl factory;
 
     /** Closed marker. */
-    private volatile boolean closed = false;
+    private final AtomicBoolean isClosed = new AtomicBoolean(false);
 
     /** Resource resolver context. */
     private final ResourceResolverContext context;
@@ -101,9 +102,11 @@ public class ResourceResolverImpl extends SlingAdaptable implements ResourceReso
     /**
      * The resource resolver context.
      */
-    public ResourceResolverImpl(final CommonResourceResolverFactoryImpl factory, final ResourceResolverContext ctx) {
+    public ResourceResolverImpl(final CommonResourceResolverFactoryImpl factory,
+            final ResourceResolverContext ctx) {
         this.factory = factory;
         this.context = ctx;
+        this.factory.register(this, ctx);
     }
 
     /**
@@ -136,29 +139,16 @@ public class ResourceResolverImpl extends SlingAdaptable implements ResourceReso
      * @see org.apache.sling.api.resource.ResourceResolver#isLive()
      */
     public boolean isLive() {
-        return !this.closed && this.context.isLive() && this.factory.isLive();
+        return !this.isClosed.get() && this.context.isLive() && this.factory.isLive();
     }
 
     /**
      * @see org.apache.sling.api.resource.ResourceResolver#close()
      */
     public void close() {
-        if (!this.closed) {
-            this.closed = true;
-            this.context.close();
-            this.factory.closed(this);
+        if ( this.isClosed.compareAndSet(false, true)) {
+            this.factory.unregister(this, this.context);
         }
-    }
-
-    /**
-     * Calls the {@link #close()} method to ensure the resolver is properly
-     * cleaned up before it is being collected by the garbage collector because
-     * it is not referred to any more.
-     */
-    @Override
-    protected void finalize() throws Throwable {
-        close();
-        super.finalize();
     }
 
     /**
@@ -168,7 +158,7 @@ public class ResourceResolverImpl extends SlingAdaptable implements ResourceReso
      *             If the resolver is already closed
      */
     private void checkClosed() {
-        if (this.closed) {
+        if (this.isClosed.get()) {
             throw new IllegalStateException("Resource resolver is already closed.");
         }
     }
@@ -317,8 +307,8 @@ public class ResourceResolverImpl extends SlingAdaptable implements ResourceReso
         for (int i = 0; res == null && i < realPathList.length; i++) {
             final ParsedParameters parsedPath = new ParsedParameters(realPathList[i]);
             final String realPath = parsedPath.getRawPath();
-            
-            
+
+
             // first check whether the requested resource is a StarResource
             if (StarResource.appliesTo(realPath)) {
                 logger.debug("resolve: Mapped path {} is a Star Resource", realPath);
@@ -342,10 +332,6 @@ public class ResourceResolverImpl extends SlingAdaptable implements ResourceReso
 
                 }
             }
-            if (res != null) {
-                res.getResourceMetadata().setParameterMap(parsedPath.getParameters());
-            }
-
         }
 
         // if no resource has been found, use a NonExistingResource
@@ -624,7 +610,7 @@ public class ResourceResolverImpl extends SlingAdaptable implements ResourceReso
     /**
      * Methods concatenates two paths. If the first path contains parameters separated semicolon, they are
      * moved at the end of the result.
-     * 
+     *
      * @param pathWithParameters
      * @param segmentToAppend
      * @return
@@ -868,6 +854,7 @@ public class ResourceResolverImpl extends SlingAdaptable implements ResourceReso
             final String rpi = absPath.substring(curPath.length());
             resource.getResourceMetadata().setResolutionPath(absPath.substring(0, curPath.length()));
             resource.getResourceMetadata().setResolutionPathInfo(rpi);
+            resource.getResourceMetadata().setParameterMap(parameters);
 
             logger.debug("resolveInternal: Found resource {} with path info {} for {}", new Object[] { resource, rpi, absPath });
 
@@ -918,6 +905,7 @@ public class ResourceResolverImpl extends SlingAdaptable implements ResourceReso
 
                 resource.getResourceMetadata().setResolutionPath(path);
                 resource.getResourceMetadata().setResolutionPathInfo(pathInfo);
+                resource.getResourceMetadata().setParameterMap(parameters);
 
                 logger.debug("resolveInternal: Found resource {} with path info {} for {}", new Object[] { resource, pathInfo,
                         absPath });
@@ -1000,6 +988,7 @@ public class ResourceResolverImpl extends SlingAdaptable implements ResourceReso
         final Resource resource = this.factory.getRootProviderEntry().getResource(this.context, this, path, parameters, isResolve);
         if (resource != null) {
             resource.getResourceMetadata().setResolutionPath(path);
+            resource.getResourceMetadata().setParameterMap(parameters);
             return resource;
         }
 
